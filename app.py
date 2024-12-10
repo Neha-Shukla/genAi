@@ -1,10 +1,11 @@
 import streamlit as st
 import pdfplumber
+import re
+import json
 from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
-from sentence_transformers import SentenceTransformer, util
-import json
 
 
 # Helper function: Extract SLA name
@@ -36,12 +37,27 @@ def analyze_text(text):
     summary = summarizer(text, max_length=150, min_length=50, do_sample=False)
     return summary[0]['summary_text']
 
-# Helper function: Extract entities
+# Helper function: Extract uptime dynamically
+def extract_uptime_value(text):
+    """Extract the uptime percentage dynamically from the SLA text."""
+    uptime_pattern = r"uptime\s*(\d+\.?\d*)%\s*"  # Regex pattern to capture uptime percentage
+    match = re.search(uptime_pattern, text, re.IGNORECASE)
+    if match:
+        return float(match.group(1))  # Return uptime percentage as a float
+    return None  # If no uptime is found, return None
+
+# Helper function: Extract entities dynamically
 def extract_entities(text):
-    """Extract SLA-specific entities."""
-    entities = {"parties_involved": [], "metrics": [], "systems": []}
+    """Extract SLA-specific entities dynamically."""
+    entities = {"parties_involved": [], "metrics": [], "systems": [], "uptime": None, "response_time": None}
     keywords = ["uptime", "response time", "latency", "recovery time"]
     
+    # Extract uptime value from text dynamically
+    uptime_value = extract_uptime_value(text)
+    if uptime_value:
+        entities["uptime"] = uptime_value  # Store the dynamically extracted uptime value
+    
+    # Extract other entities based on keywords
     for line in text.split("\n"):
         if "party" in line.lower():
             entities["parties_involved"].append(line.strip())
@@ -49,30 +65,15 @@ def extract_entities(text):
             entities["metrics"].append(line.strip())
         if "system" in line.lower():
             entities["systems"].append(line.strip())
+        if "response time" in line.lower():
+            entities["response_time"] = line.strip()  # Extract response time specifically
     
+    # Clean up lists into strings
     entities["parties_involved"] = ", ".join(entities["parties_involved"])
     entities["metrics"] = ", ".join(entities["metrics"])
     entities["systems"] = ", ".join(entities["systems"])
+    
     return entities
-
-# Semantic search using Sentence Transformers
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-def semantic_search(query, context_data):
-    """Perform semantic search using Sentence Transformers."""
-    query_embedding = model.encode(query)
-    context_embeddings = [
-        {"text": page['text'], "embedding": model.encode(page['text']), "page_number": page['page_number']}
-        for page in context_data
-    ]
-    
-    scores = [
-        util.cos_sim(query_embedding, context["embedding"]).item()
-        for context in context_embeddings
-    ]
-    
-    best_match = context_embeddings[scores.index(max(scores))]
-    return best_match['text'], best_match['page_number']
 
 # Query intent classification
 vectorizer = CountVectorizer()
@@ -93,8 +94,77 @@ classifier.fit(X_train, labels)
 
 def classify_query(query):
     """Classify the user's query intent."""
-    query_vector = vectorizer.transform([query])
-    return classifier.predict(query_vector)[0]
+    query = query.lower()
+
+    if "uptime" in query:
+        return "uptime"
+    elif "parties" in query or "who" in query:
+        return "parties"
+    elif "metrics" in query or "response time" in query:
+        return "metrics"
+    elif "system" in query:
+        return "system"
+    elif "description" in query or "overview" in query:
+        return "description"
+    else:
+        return "other"  # Catch-all for other types of queries
+
+# Semantic search using Sentence Transformers
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def semantic_search(query, context_data):
+    """Perform semantic search using Sentence Transformers."""
+    query_embedding = model.encode(query)
+    context_embeddings = [
+        {"text": page['text'], "embedding": model.encode(page['text']), "page_number": page['page_number']}
+        for page in context_data
+    ]
+    
+    scores = [
+        util.cos_sim(query_embedding, context["embedding"]).item()
+        for context in context_embeddings
+    ]
+    
+    best_match = context_embeddings[scores.index(max(scores))]
+    return best_match['text'], best_match['page_number']
+
+# Function to answer the query
+def answer_query(query, sla_details, text_data):
+    """Answer the user's query based on classification and extracted entities."""
+    intent = classify_query(query)
+    response = ""
+
+    if intent == "uptime":
+        if sla_details.get("uptime"):
+            response = f"Uptime: {sla_details['uptime']}%"
+        else:
+            response = "Uptime information is not available in the document."
+    elif intent == "parties":
+        if sla_details.get("parties_involved"):
+            response = f"Parties involved: {sla_details['parties_involved']}"
+        else:
+            response = "Parties involved information is not available in the document."
+    elif intent == "metrics":
+        if sla_details.get("metrics"):
+            response = f"Metrics: {sla_details['metrics']}"
+        else:
+            response = "Metrics information is not available in the document."
+    elif intent == "system":
+        if sla_details.get("systems"):
+            response = f"System Concerned: {sla_details['systems']}"
+        else:
+            response = "System concerned information is not available in the document."
+    elif intent == "description":
+        if sla_details.get("description"):
+            response = f"Description: {sla_details['description']}"
+        else:
+            response = "Description information is not available in the document."
+    else:
+        # Semantic search fallback for unknown queries
+        matched_text, page_number = semantic_search(query, text_data)
+        response = f"Found this information on page {page_number}: {matched_text}"
+
+    return response
 
 # Streamlit UI
 st.title("Enhanced SLA & KPI Analyzer")
@@ -114,18 +184,19 @@ if uploaded_file is not None:
         st.error("No text found in the document.")
     else:
         st.success("Text extraction completed!")
-        
+
         # Summarization and entity extraction
         combined_text = " ".join([page['text'] for page in text_data if page['text'].strip()])
-        description = analyze_text(combined_text)
         entities = extract_entities(combined_text)
 
         sla_details = {
             "sla_name": extract_sla_name(combined_text),
             "parties_involved": entities["parties_involved"],
             "system_concerned": entities["systems"],
-            "description": description,
+            "description": analyze_text(combined_text),
             "associated_metrics": entities["metrics"],
+            "uptime": entities["uptime"],
+            "response_time": entities["response_time"],
             "page_number": [page['page_number'] for page in text_data if page['text'].strip()]
         }
 
@@ -138,24 +209,7 @@ if uploaded_file is not None:
         user_query = st.text_input("Enter your query:")
 
         if user_query:
-            intent = classify_query(user_query)
-            response = ""
-
-            if intent == "sla":
-                response = f"SLA Name: {sla_details['sla_name']}"
-            elif intent == "parties":
-                response = f"Parties involved: {sla_details['parties_involved']}"
-            elif intent == "metrics":
-                response = f"Metrics: {sla_details['associated_metrics']}"
-            elif intent == "system":
-                response = f"System Concerned: {sla_details['system_concerned']}"
-            elif intent == "description":
-                response = f"Description: {sla_details['description']}"
-            else:
-                # Semantic search fallback
-                matched_text, page_number = semantic_search(user_query, text_data)
-                response = f"Found this information on page {page_number}: {matched_text}"
-
+            response = answer_query(user_query, sla_details, text_data)
             st.write(response)
 
         # Download SLA details
