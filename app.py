@@ -7,13 +7,17 @@ from sentence_transformers import SentenceTransformer, util
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
 
+# Initialize session state variables
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+
+if 'sla_details' not in st.session_state:
+    st.session_state.sla_details = {}
 
 # Helper function: Extract SLA name
 def extract_sla_name(text):
-    """Extract SLA name dynamically from the text."""
     sla_keywords = ["Service Level Agreement", "SLA"]
     lines = text.split("\n")
-    
     for line in lines:
         if any(keyword.lower() in line.lower() for keyword in sla_keywords):
             return line.strip()
@@ -21,7 +25,6 @@ def extract_sla_name(text):
 
 # Helper function: Extract text with page numbers
 def extract_text_with_pages(pdf_path):
-    """Extract text from a PDF file with page numbers."""
     text_data = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
@@ -32,14 +35,12 @@ def extract_text_with_pages(pdf_path):
 
 # Helper function: Analyze text for summarization
 def analyze_text(text):
-    """Analyze text using a summarization model."""
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device=-1)
     summary = summarizer(text, max_length=150, min_length=50, do_sample=False)
     return summary[0]['summary_text']
 
 # Helper function: Extract uptime dynamically
 def extract_uptime_value(text):
-    """Extract the uptime percentage dynamically from the SLA text."""
     uptime_pattern = r"uptime\s*(\d+\.?\d*)%\s*"  # Regex pattern to capture uptime percentage
     match = re.search(uptime_pattern, text, re.IGNORECASE)
     if match:
@@ -48,16 +49,13 @@ def extract_uptime_value(text):
 
 # Helper function: Extract entities dynamically
 def extract_entities(text):
-    """Extract SLA-specific entities dynamically."""
     entities = {"parties_involved": [], "metrics": [], "systems": [], "uptime": None, "response_time": None}
     keywords = ["uptime", "response time", "latency", "recovery time"]
     
-    # Extract uptime value from text dynamically
     uptime_value = extract_uptime_value(text)
     if uptime_value:
         entities["uptime"] = uptime_value  # Store the dynamically extracted uptime value
     
-    # Extract other entities based on keywords
     for line in text.split("\n"):
         if "party" in line.lower():
             entities["parties_involved"].append(line.strip())
@@ -66,9 +64,8 @@ def extract_entities(text):
         if "system" in line.lower():
             entities["systems"].append(line.strip())
         if "response time" in line.lower():
-            entities["response_time"] = line.strip()  # Extract response time specifically
+            entities["response_time"] = line.strip()
     
-    # Clean up lists into strings
     entities["parties_involved"] = ", ".join(entities["parties_involved"])
     entities["metrics"] = ", ".join(entities["metrics"])
     entities["systems"] = ", ".join(entities["systems"])
@@ -93,7 +90,6 @@ X_train = vectorizer.fit_transform(texts)
 classifier.fit(X_train, labels)
 
 def classify_query(query):
-    """Classify the user's query intent."""
     query = query.lower()
 
     if "uptime" in query:
@@ -107,13 +103,12 @@ def classify_query(query):
     elif "description" in query or "overview" in query:
         return "description"
     else:
-        return "other"  # Catch-all for other types of queries
+        return "other"
 
 # Semantic search using Sentence Transformers
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 def semantic_search(query, context_data):
-    """Perform semantic search using Sentence Transformers."""
     query_embedding = model.encode(query)
     context_embeddings = [
         {"text": page['text'], "embedding": model.encode(page['text']), "page_number": page['page_number']}
@@ -130,7 +125,6 @@ def semantic_search(query, context_data):
 
 # Function to answer the query
 def answer_query(query, sla_details, text_data):
-    """Answer the user's query based on classification and extracted entities."""
     intent = classify_query(query)
     response = ""
 
@@ -160,15 +154,61 @@ def answer_query(query, sla_details, text_data):
         else:
             response = "Description information is not available in the document."
     else:
-        # Semantic search fallback for unknown queries
         matched_text, page_number = semantic_search(query, text_data)
         response = f"Found this information on page {page_number}: {matched_text}"
 
     return response
 
 # Streamlit UI
-st.title("Enhanced SLA & KPI Analyzer")
-st.write("Upload SLA documents to extract, analyze, and interact with key details.")
+st.set_page_config(page_title="SLA & KPI Analyzer", page_icon="📊", layout="wide")
+
+# Add a custom CSS style for better look
+st.markdown("""
+    <style>
+        .stButton>button {
+            background-color: #4CAF50;
+            color: white;
+            font-size: 16px;
+            padding: 10px 20px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .stTextInput>div>div>input {
+            border: 2px solid #4CAF50;
+            padding: 10px;
+        }
+        .stTextInput>div>div>input:focus {
+            border-color: #FF5722;
+        }
+        .stJson {
+            background-color: #f1f1f1;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #ddd;
+        }
+        .conversation-history {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f4f4f4;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        .user-query {
+            font-weight: bold;
+            color: #3b82f6;
+        }
+        .bot-response {
+            font-style: italic;
+            color: #4CAF50;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Add a banner image or title for extra design
+st.markdown("""
+    <h1 style="text-align: center; color: #4CAF50;">SLA & KPI Analyzer</h1>
+    <p style="text-align: center; color: #555;">Upload SLA documents to extract, analyze, and interact with key details.</p>
+""", unsafe_allow_html=True)
 
 uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
 
@@ -189,7 +229,7 @@ if uploaded_file is not None:
         combined_text = " ".join([page['text'] for page in text_data if page['text'].strip()])
         entities = extract_entities(combined_text)
 
-        sla_details = {
+        st.session_state.sla_details = {
             "sla_name": extract_sla_name(combined_text),
             "parties_involved": entities["parties_involved"],
             "system_concerned": entities["systems"],
@@ -202,20 +242,30 @@ if uploaded_file is not None:
 
         # Display extracted SLA details
         st.subheader("Extracted SLA Details")
-        st.json(sla_details)
+        st.json(st.session_state.sla_details)
 
         # Conversational Chat
         st.subheader("Ask about the SLA")
         user_query = st.text_input("Enter your query:")
 
         if user_query:
-            response = answer_query(user_query, sla_details, text_data)
-            st.write(response)
+            response = answer_query(user_query, st.session_state.sla_details, text_data)
+
+            # Add query and response to conversation history
+            st.session_state.conversation_history.append(f"User: {user_query}")
+            st.session_state.conversation_history.append(f"Bot: {response}")
+
+            # Display conversation history
+            for message in st.session_state.conversation_history:
+                if message.startswith("User:"):
+                    st.markdown(f"<div class='conversation-history user-query'>{message}</div>", unsafe_allow_html=True)
+                elif message.startswith("Bot:"):
+                    st.markdown(f"<div class='conversation-history bot-response'>{message}</div>", unsafe_allow_html=True)
 
         # Download SLA details
         st.download_button(
             label="Download SLA Details as JSON",
-            data=json.dumps(sla_details, indent=4),
+            data=json.dumps(st.session_state.sla_details, indent=4),
             file_name="sla_details.json",
             mime="application/json"
         )
